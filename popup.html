@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ChatGPT Image Exporter</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <img class="brand-logo" src="icons/icon128.png" alt="" />
+        </div>
+        <div>
+          <h1>ChatGPT Image Exporter</h1>
+          <p class="subhead">Fast bulk export from your Images tab</p>
+        </div>
+      </header>
+
+      <div class="card">
+        <div class="row">
+          <label>Folder name (under Downloads)</label>
+          <input id="folder" type="text" placeholder="ChatGPT_Images" />
+        </div>
+
+        <div class="grid2">
+          <div class="row">
+            <label>Max images (0 = all)</label>
+            <input id="maxImages" type="number" min="0" step="1" />
+          </div>
+          <div class="row">
+            <label>Start index (resume)</label>
+            <input id="startIndex" type="number" min="0" step="1" />
+          </div>
+        </div>
+
+        <div class="row">
+          <label>
+            <input id="downloadMetadata" type="checkbox" />
+            Download metadata.json + failures.json
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="btnStart" class="primary">Start export</button>
+          <button id="btnStop" class="danger">Stop</button>
+        </div>
+
+        <div class="status">
+          <div><b>Status:</b> <span id="statusText">Idle</span></div>
+          <div><b>Progress:</b> <span id="progressText">0 / 0</span></div>
+          <div><b>Estimated time:</b> <span id="estimatedTimeText">--</span></div>
+          <div><b>Remaining time:</b> <span id="remainingTimeText">--</span></div>
+          <div><b>Downloaded:</b> <span id="okText">0</span> &nbsp; <b>Failed:</b> <span id="failText">0</span></div>
+        </div>
+      </div>
+
+      <div class="hint">
+        Use on <code>chatgpt.com/images</code>. Keep the tab open during export.
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
