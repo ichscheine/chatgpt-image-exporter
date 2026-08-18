@@ -1,3 +1,5 @@
+import { migrateSettings, SETTINGS_VERSION } from "./export-range.mjs";
+
 const $ = (id) => document.getElementById(id);
 
 const DEFAULTS = {
@@ -7,12 +9,17 @@ const DEFAULTS = {
   delayMs: 900,
   jitterMs: 300,
   retries: 3,
-  downloadMetadata: false
+  downloadMetadata: false,
+  settingsVersion: SETTINGS_VERSION
 };
 
 async function loadSettings() {
   const { settings } = await chrome.storage.local.get(["settings"]);
-  return { ...DEFAULTS, ...(settings || {}) };
+  const migrated = migrateSettings(settings, DEFAULTS);
+  if (!settings || settings.settingsVersion !== migrated.settingsVersion) {
+    await saveSettings(migrated);
+  }
+  return migrated;
 }
 
 async function saveSettings(s) {
@@ -39,7 +46,8 @@ function readFromUI() {
     delayMs: DEFAULTS.delayMs,
     jitterMs: DEFAULTS.jitterMs,
     retries: DEFAULTS.retries,
-    downloadMetadata: $("downloadMetadata").checked
+    downloadMetadata: $("downloadMetadata").checked,
+    settingsVersion: SETTINGS_VERSION
   };
 }
 
@@ -65,7 +73,13 @@ async function refreshStatus() {
   $("failText").textContent = st.progress?.fail || 0;
 
   if (st.running) {
-    setStatusText("Running");
+    if (st.phase === "indexing") {
+      const scanned = st.indexProgress?.scanned || 0;
+      const selected = st.indexProgress?.selected || 0;
+      setStatusText(`Indexing library… ${scanned} scanned, ${selected} selected`);
+    } else {
+      setStatusText("Downloading");
+    }
   } else if (st.authError) {
     setStatusText(st.authError);
   } else {

@@ -1,0 +1,8 @@
+{
+  "name": "chatgpt-image-exporter",
+  "version": "1.0.2",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

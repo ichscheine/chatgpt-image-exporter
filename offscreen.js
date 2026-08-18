@@ -8,14 +8,6 @@ function jitter(base, j) {
   return base + Math.floor(Math.random() * (j + 1));
 }
 
-function normalizeEndpointToLimit(endpoint, limit) {
-  const u = new URL(endpoint);
-  u.searchParams.set("limit", String(limit));
-  // Remove pagination if present; we want one big shot first.
-  u.searchParams.delete("after");
-  return u.toString();
-}
-
 function extensionFromType(contentType) {
   if (!contentType) return "";
   const ct = contentType.toLowerCase().split(";")[0].trim();
@@ -40,23 +32,6 @@ function extensionFromUrl(url) {
   } catch {
     return "";
   }
-}
-
-async function fetchJson(url, headers) {
-  const res = await fetch(url, {
-    method: "GET",
-    headers: headers || undefined,
-    credentials: "include",
-    mode: "cors"
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    const err = new Error(`HTTP ${res.status}`);
-    err.status = res.status;
-    err.body = t;
-    throw err;
-  }
-  return await res.json();
 }
 
 async function fetchBlob(url, headers) {
@@ -131,8 +106,7 @@ async function runExport({ tabId, settings, endpoint, headers, metadata }) {
   // If we don’t have authorization header, the metadata endpoint may 401.
   // We can still try; some sessions might work with cookies only.
   const folder = settings.folder || "ChatGPT_Images";
-  const maxImages = Number(settings.maxImages || 0);
-  const startIndex = Number(settings.startIndex || 0);
+  const startIndex = Math.max(Number(metadata?.startIndex ?? settings.startIndex ?? 0), 0);
   const delayMs = Number(settings.delayMs || 0);
   const jitterMs = Number(settings.jitterMs || 0);
   const retries = Number(settings.retries || 0);
@@ -161,38 +135,41 @@ async function runExport({ tabId, settings, endpoint, headers, metadata }) {
     };
   }
 
-  // 1) Fetch metadata list (prefer prefetched tab-context data to avoid cookie/auth issues)
-  let data = metadata || null;
-  if (!data) {
-    try {
-      const limit = maxImages > 0 ? maxImages : 10000;
-      const url = normalizeEndpointToLimit(endpoint, limit);
-      data = await fetchJson(url, headers);
-    } catch (e) {
-      if (e?.status === 401) {
-        chrome.runtime.sendMessage({ type: "EXPORT_NEED_AUTH", error: "401 Unauthorized. Re-open chatgpt.com/images and click Start export again." });
-        return;
-      }
-      chrome.runtime.sendMessage({ type: "EXPORT_NEED_AUTH", error: `Failed to fetch metadata: ${e}` });
-      return;
-    }
+  if (!Array.isArray(metadata?.items)) {
+    chrome.runtime.sendMessage({
+      type: "EXPORT_NEED_AUTH",
+      error: "No paginated metadata was supplied for this export. Please start again."
+    });
+    return;
   }
 
-  const items = Array.isArray(data?.items) ? data.items : [];
+  const items = metadata.items;
   const total = items.length;
-  const end = (maxImages > 0) ? Math.min(total, maxImages) : total;
-  const totalPlanned = Math.max(end - startIndex, 0);
+  const end = total;
+  const totalPlanned = total;
   progress.total = totalPlanned;
 
   chrome.runtime.sendMessage({ type: "EXPORT_PROGRESS", progress: withEstimates(progress) });
 
   // Export metadata early (so you have it even if downloads get interrupted)
   if (downloadMetadata) {
-    await downloadJsonToFile({ fetchedAt: new Date().toISOString(), endpointUsed: endpoint, total, data }, "metadata.json", folder);
+    await downloadJsonToFile({
+      fetchedAt: new Date().toISOString(),
+      endpointUsed: endpoint,
+      total,
+      range: {
+        startIndex,
+        requestedCount: metadata.requestedCount,
+        scanned: metadata.scanned,
+        pages: metadata.pages,
+        exhausted: metadata.exhausted
+      },
+      data: { items }
+    }, "metadata.json", folder);
   }
 
   // 2) Download each image using bounded concurrency
-  let nextIndex = startIndex;
+  let nextIndex = 0;
   let processed = 0;
 
   function emitProgress() {
@@ -203,10 +180,11 @@ async function runExport({ tabId, settings, endpoint, headers, metadata }) {
   async function processOne(i) {
     const item = items[i];
     const url = item?.url;
+    const exportIndex = startIndex + i;
 
     if (!url) {
       progress.fail++;
-      failures.push({ i, reason: "missing url", item });
+      failures.push({ i: exportIndex, reason: "missing url", item });
       return;
     }
 
@@ -229,7 +207,7 @@ async function runExport({ tabId, settings, endpoint, headers, metadata }) {
           }
         }
 
-        const filename = makeFilenameFlat(i, item, blob);
+        const filename = makeFilenameFlat(exportIndex, item, blob);
         await downloadBlobToFile(blob, filename, folder);
 
         progress.ok++;
@@ -238,7 +216,7 @@ async function runExport({ tabId, settings, endpoint, headers, metadata }) {
         const status = e?.status;
         if (attempt > retries) {
           progress.fail++;
-          failures.push({ i, url, status, error: String(e) });
+          failures.push({ i: exportIndex, url, status, error: String(e) });
         } else {
           // Backoff
           await sleep(500 + attempt * 350);

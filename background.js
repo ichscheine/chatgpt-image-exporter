@@ -1,15 +1,19 @@
-let offscreenReady = false;
-const DEFAULT_ENDPOINT = "https://chatgpt.com/backend-api/my/recent/image_gen?limit=25";
+import {
+  collectMetadataRange,
+  DEFAULT_METADATA_PAGE_SIZE
+} from "./export-range.mjs";
 
-function normalizeEndpointToLimit(endpoint, limit) {
-  const u = new URL(endpoint);
-  u.searchParams.set("limit", String(limit));
-  u.searchParams.delete("after");
-  return u.toString();
+let offscreenReady = false;
+let exportSequence = 0;
+const DEFAULT_ENDPOINT = "https://chatgpt.com/backend-api/my/recent/image_gen?limit=25";
+const METADATA_PAGE_DELAY_MS = 100;
+const METADATA_PAGE_RETRIES = 3;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchMetadataInTab(tabId, endpoint, headers, limit) {
-  const url = normalizeEndpointToLimit(endpoint, limit);
+async function fetchMetadataPageInTab(tabId, url, headers) {
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -42,11 +46,19 @@ async function fetchMetadataInTab(tabId, endpoint, headers, limit) {
           if (token) hdrs.authorization = `Bearer ${token}`;
         }
 
-        const res = await fetch(endpointUrl, {
-          method: "GET",
-          headers: Object.keys(hdrs).length ? hdrs : undefined,
-          credentials: "include"
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+        let res;
+        try {
+          res = await fetch(endpointUrl, {
+            method: "GET",
+            headers: Object.keys(hdrs).length ? hdrs : undefined,
+            credentials: "include",
+            signal: controller.signal
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
         const text = await res.text();
         if (!res.ok) {
           return {
@@ -70,6 +82,14 @@ async function fetchMetadataInTab(tabId, endpoint, headers, limit) {
   });
 
   return result?.result || { ok: false, status: 0, error: "No result from tab fetch." };
+}
+
+function metadataFetchError(result, page) {
+  const status = result?.status || "error";
+  const detail = result?.error || "Unknown error.";
+  const error = new Error(`Metadata page ${page} failed (${status}). ${detail}`);
+  error.status = result?.status || 0;
+  return error;
 }
 
 async function setState(patch) {
@@ -151,6 +171,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === "START_EXPORT") {
       await ensureOffscreen();
+      const exportId = ++exportSequence;
 
       const st = await getState();
       if (!st.endpoint) {
@@ -171,44 +192,91 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       await setState({
         running: true,
+        phase: "indexing",
         authError: null,
         progress: { current: 0, total: 0, ok: 0, fail: 0 },
+        indexProgress: { pages: 0, scanned: 0, selected: 0, targetIndex: null },
         stopRequested: false
       });
 
-      const limit = Number(msg.settings?.maxImages || 0) > 0 ? Number(msg.settings.maxImages) : 10000;
-      const tabFetch = await fetchMetadataInTab(msg.tabId, st3.endpoint, st3.headers || null, limit);
-      if (!tabFetch.ok) {
+      let requestHeaders = st3.headers || null;
+      try {
+        const metadata = await collectMetadataRange({
+          endpoint: st3.endpoint,
+          startIndex: msg.settings?.startIndex,
+          maxImages: msg.settings?.maxImages,
+          pageSize: DEFAULT_METADATA_PAGE_SIZE,
+          shouldStop: () => exportId !== exportSequence,
+          fetchPage: async (url, pageState) => {
+            if (pageState.page > 1) await sleep(METADATA_PAGE_DELAY_MS);
+
+            for (let attempt = 0; attempt <= METADATA_PAGE_RETRIES; attempt++) {
+              const result = await fetchMetadataPageInTab(msg.tabId, url, requestHeaders);
+              if (result.ok) {
+                if (result.headersUsed && typeof result.headersUsed === "object") {
+                  requestHeaders = { ...(requestHeaders || {}), ...result.headersUsed };
+                }
+                return result.data;
+              }
+
+              const retryable = !result.status || result.status === 429 || result.status >= 500;
+              if (!retryable || attempt === METADATA_PAGE_RETRIES) {
+                throw metadataFetchError(result, pageState.page);
+              }
+              await sleep(500 * (2 ** attempt));
+            }
+
+            throw new Error(`Metadata page ${pageState.page} failed.`);
+          },
+          onProgress: async (indexProgress) => {
+            if (exportId !== exportSequence) return;
+            await setState({ indexProgress });
+          }
+        });
+
+        if (exportId !== exportSequence) {
+          sendResponse?.({ ok: false, error: "Export stopped." });
+          return;
+        }
+
+        if (requestHeaders) {
+          await setState({ headers: requestHeaders });
+        }
+
+        await setState({ phase: "downloading" });
+        chrome.runtime.sendMessage({
+          type: "OFFSCREEN_START",
+          tabId: msg.tabId,
+          settings: msg.settings,
+          endpoint: st3.endpoint,
+          headers: requestHeaders,
+          metadata
+        });
+
+        sendResponse?.({ ok: true });
+      } catch (error) {
+        if (error?.name === "AbortError" || exportId !== exportSequence) {
+          sendResponse?.({ ok: false, error: "Export stopped." });
+          return;
+        }
+
+        const errorMessage = error?.message || String(error);
         await setState({
           running: false,
+          phase: "error",
           headers: null,
-          authError: `Metadata fetch failed (${tabFetch.status || "error"}). ${tabFetch.error || "Unknown error."}`
+          authError: error?.status === 401
+            ? "401 Unauthorized. Re-open chatgpt.com/images and click Start export again."
+            : errorMessage
         });
-        sendResponse?.({ ok: false, error: "Metadata fetch failed in tab context" });
-        return;
+        sendResponse?.({ ok: false, error: errorMessage });
       }
-
-      if (tabFetch.headersUsed && typeof tabFetch.headersUsed === "object") {
-        const mergedHeaders = { ...(st3.headers || {}), ...tabFetch.headersUsed };
-        await setState({ headers: mergedHeaders });
-      }
-      const st4 = await getState();
-
-      chrome.runtime.sendMessage({
-        type: "OFFSCREEN_START",
-        tabId: msg.tabId,
-        settings: msg.settings,
-        endpoint: st3.endpoint,
-        headers: st4.headers || st3.headers || null,
-        metadata: tabFetch.data
-      });
-
-      sendResponse?.({ ok: true });
       return;
     }
 
     if (msg.type === "STOP_EXPORT") {
-      await setState({ stopRequested: true, running: false });
+      exportSequence++;
+      await setState({ stopRequested: true, running: false, phase: "stopped" });
       await clearSensitiveHeaders();
       chrome.runtime.sendMessage({ type: "OFFSCREEN_STOP" }).catch(() => {});
       sendResponse?.({ ok: true });
@@ -238,14 +306,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.type === "EXPORT_DONE") {
-      await setState({ running: false, progress: msg.progress, lastRun: Date.now() });
+      await setState({ running: false, phase: "done", progress: msg.progress, lastRun: Date.now() });
       await clearSensitiveHeaders();
       sendResponse?.({ ok: true });
       return;
     }
 
     if (msg.type === "EXPORT_NEED_AUTH") {
-      await setState({ running: false, authError: msg.error || "Missing/expired auth." });
+      await setState({ running: false, phase: "error", authError: msg.error || "Missing/expired auth." });
       await clearSensitiveHeaders();
       sendResponse?.({ ok: true });
       return;
