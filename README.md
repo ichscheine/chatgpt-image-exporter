@@ -6,7 +6,8 @@ Chrome extension for bulk exporting images from your ChatGPT Images library to y
 
 - Exports images from `https://chatgpt.com/images`.
 - Saves files locally under a folder you choose in Downloads.
-- Supports a max image count and start index for resuming interrupted exports.
+- Supports an image count and start index for resuming interrupted exports.
+- Reads large libraries in bounded metadata pages instead of requesting the full history at once.
 - Optionally downloads `metadata.json` and `failures.json` for troubleshooting.
 - Does not send telemetry or data to any third-party service.
 
@@ -17,6 +18,9 @@ Chrome extension for bulk exporting images from your ChatGPT Images library to y
 3. Choose Load unpacked.
 4. Select this repository folder.
 5. Open `https://chatgpt.com/images`, open the extension popup, and start the export.
+
+For example, to export 500 images beginning at index 7,500, enter `500` for
+**Number of images** and `7500` for **Start index**.
 
 ## Permissions
 
@@ -40,7 +44,9 @@ If metadata export is enabled, `metadata.json` can contain account-specific imag
 
 - ChatGPT's internal image API can change, which may break export until the extension is updated.
 - Keep the ChatGPT Images tab open while exporting.
-- Large exports may take time and can be affected by network/session expiry.
+- Large exports may take time and can be affected by network/session expiry. The
+  extension shows indexing progress before downloads begin when it must traverse
+  earlier metadata pages.
 
 ## Release Checklist
 
