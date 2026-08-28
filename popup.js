@@ -78,7 +78,7 @@ async function refreshStatus() {
       const selected = st.indexProgress?.selected || 0;
       setStatusText(`Indexing library… ${scanned} scanned, ${selected} selected`);
     } else {
-      setStatusText("Downloading");
+      setStatusText("Building ZIP");
     }
   } else if (st.authError) {
     setStatusText(st.authError);

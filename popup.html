@@ -19,7 +19,7 @@
 
       <div class="card">
         <div class="row">
-          <label>Folder name (under Downloads)</label>
+          <label>ZIP file name</label>
           <input id="folder" type="text" placeholder="ChatGPT_Images" />
         </div>
 
@@ -37,7 +37,7 @@
         <div class="row">
           <label>
             <input id="downloadMetadata" type="checkbox" />
-            Download metadata.json + failures.json
+            Include metadata.json + failures.json inside ZIP
           </label>
         </div>
 
@@ -51,7 +51,7 @@
           <div><b>Progress:</b> <span id="progressText">0 / 0</span></div>
           <div><b>Estimated time:</b> <span id="estimatedTimeText">--</span></div>
           <div><b>Remaining time:</b> <span id="remainingTimeText">--</span></div>
-          <div><b>Downloaded:</b> <span id="okText">0</span> &nbsp; <b>Failed:</b> <span id="failText">0</span></div>
+          <div><b>Added:</b> <span id="okText">0</span> &nbsp; <b>Failed:</b> <span id="failText">0</span></div>
         </div>
       </div>
 
