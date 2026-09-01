@@ -1,8 +1,9 @@
 {
   "name": "chatgpt-image-exporter",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "scripts": {
+    "build:release": "node scripts/build-release.mjs",
     "test": "node --test"
   }
 }

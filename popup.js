@@ -82,6 +82,10 @@ async function refreshStatus() {
     }
   } else if (st.authError) {
     setStatusText(st.authError);
+  } else if (st.phase === "done") {
+    setStatusText("Done");
+  } else if (st.phase === "stopped") {
+    setStatusText("Stopped");
   } else {
     setStatusText("Idle");
   }

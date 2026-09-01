@@ -8,11 +8,13 @@
   const token = document.currentScript?.dataset?.cgptImageExporterToken || "";
 
   const isLikelyImagesList = (url) => {
-    if (!url) return false;
-    // Known today: /backend-api/my/recent/image_gen?limit=25
-    // Future-proof: any backend-api my/recent + image
-    return url.includes("/backend-api/") &&
-      (url.includes("image_gen") || (url.includes("/my/") && url.includes("image")));
+    try {
+      const parsed = new URL(url, window.location.origin);
+      return parsed.origin === "https://chatgpt.com" &&
+        parsed.pathname === "/backend-api/my/recent/image_gen";
+    } catch {
+      return false;
+    }
   };
 
   const normalizeHeaders = (h) => {
@@ -41,7 +43,7 @@
       type: "CGPT_IMG_ENDPOINT",
       endpoint,
       headers
-    }, "*");
+    }, window.location.origin);
   };
 
   // Patch fetch

@@ -7,6 +7,19 @@
   const SOURCE = "CGPT_IMAGE_EXPORTER";
   const token = crypto.randomUUID();
 
+  function normalizeMetadataEndpoint(value) {
+    try {
+      const url = new URL(value, window.location.origin);
+      if (url.origin !== "https://chatgpt.com" || url.pathname !== "/backend-api/my/recent/image_gen") {
+        return null;
+      }
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return null;
+    }
+  }
+
   function inject() {
     const s = document.createElement("script");
     s.src = chrome.runtime.getURL("injected.js");
@@ -28,9 +41,11 @@
     if (msg.type === "CGPT_IMG_ENDPOINT") {
       try {
         if (!chrome?.runtime?.id) return;
+        const endpoint = normalizeMetadataEndpoint(msg.endpoint);
+        if (!endpoint) return;
         const maybePromise = chrome.runtime.sendMessage({
           type: "CGPT_IMG_ENDPOINT",
-          endpoint: msg.endpoint,
+          endpoint,
           headers: msg.headers || null
         });
         if (maybePromise?.catch) {

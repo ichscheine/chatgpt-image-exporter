@@ -2,10 +2,14 @@ import {
   collectMetadataRange,
   DEFAULT_METADATA_PAGE_SIZE
 } from "./export-range.mjs";
+import {
+  DEFAULT_METADATA_ENDPOINT,
+  filterChatGptHeaders,
+  normalizeMetadataEndpoint
+} from "./security.mjs";
 
 let offscreenReady = false;
 let exportSequence = 0;
-const DEFAULT_ENDPOINT = "https://chatgpt.com/backend-api/my/recent/image_gen?limit=25";
 const METADATA_PAGE_DELAY_MS = 100;
 const METADATA_PAGE_RETRIES = 3;
 
@@ -13,11 +17,57 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isChatGptImagesTab(urlValue) {
+  try {
+    const url = new URL(urlValue);
+    return url.origin === "https://chatgpt.com" && url.pathname.startsWith("/images");
+  } catch {
+    return false;
+  }
+}
+
+function waitForDownloadCompletion(downloadId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      if (error) reject(error);
+      else resolve();
+    };
+
+    const inspect = (item) => {
+      if (item?.state === "complete") finish();
+      if (item?.state === "interrupted") {
+        finish(new Error(`ZIP download was interrupted${item.error ? `: ${item.error}` : "."}`));
+      }
+    };
+
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      inspect({ state: delta.state?.current, error: delta.error?.current });
+    };
+
+    chrome.downloads.onChanged.addListener(onChanged);
+    chrome.downloads.search({ id: downloadId }).then(
+      (items) => inspect(items[0]),
+      (error) => finish(error)
+    );
+  });
+}
+
 async function fetchMetadataPageInTab(tabId, url, headers) {
+  const trustedEndpoint = normalizeMetadataEndpoint(url);
+  if (!trustedEndpoint) {
+    return { ok: false, status: 0, error: "Rejected untrusted metadata endpoint." };
+  }
+
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [url, headers || null],
+    args: [trustedEndpoint, filterChatGptHeaders(headers)],
     func: async (endpointUrl, reqHeaders) => {
       const normalize = (h) => {
         const out = {};
@@ -27,6 +77,23 @@ async function fetchMetadataPageInTab(tabId, url, headers) {
         }
         return out;
       };
+
+      const trustedEndpoint = (() => {
+        try {
+          const url = new URL(endpointUrl, location.origin);
+          if (url.origin !== "https://chatgpt.com" || url.pathname !== "/backend-api/my/recent/image_gen") {
+            return null;
+          }
+          url.hash = "";
+          return url.toString();
+        } catch {
+          return null;
+        }
+      })();
+
+      if (!trustedEndpoint) {
+        return { ok: false, status: 0, error: "Rejected untrusted metadata endpoint.", headersUsed: null };
+      }
 
       const getTokenFromSession = async () => {
         try {
@@ -50,7 +117,7 @@ async function fetchMetadataPageInTab(tabId, url, headers) {
         const timeoutId = setTimeout(() => controller.abort(), 30000);
         let res;
         try {
-          res = await fetch(endpointUrl, {
+          res = await fetch(trustedEndpoint, {
             method: "GET",
             headers: Object.keys(hdrs).length ? hdrs : undefined,
             credentials: "include",
@@ -131,21 +198,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     // From content/injected: endpoint discovery
     if (msg.type === "CGPT_IMG_ENDPOINT") {
+      if (sender.id !== chrome.runtime.id || !isChatGptImagesTab(sender.tab?.url)) {
+        sendResponse?.({ ok: false, error: "Rejected endpoint from an untrusted sender." });
+        return;
+      }
+
       const st = await getState();
-      const endpoint = msg.endpoint || st.endpoint;
+      const endpoint = normalizeMetadataEndpoint(msg.endpoint) || normalizeMetadataEndpoint(st.endpoint);
+
+      if (!endpoint) {
+        sendResponse?.({ ok: false, error: "Rejected untrusted metadata endpoint." });
+        return;
+      }
 
       // Capture authorization if present (best case)
       // If not present, we still store endpoint and later re-capture from another call.
-      let headers = msg.headers || st.headers || null;
-
-      // Normalize + keep only safe/needed headers
-      if (headers) {
-        const keep = {};
-        for (const k of ["authorization", "oai-client-version", "oai-client-build-number", "oai-device-id", "oai-language"]) {
-          if (headers[k]) keep[k] = headers[k];
-        }
-        headers = Object.keys(keep).length ? keep : null;
-      }
+      const headers = filterChatGptHeaders(msg.headers || st.headers);
 
       await setState({ endpoint, headers });
       sendResponse?.({ ok: true });
@@ -162,8 +230,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // Give injected hooks a moment to report; then fall back to known endpoint.
       await new Promise((r) => setTimeout(r, 1400));
       const st = await getState();
-      if (!st.endpoint) {
-        await setState({ endpoint: DEFAULT_ENDPOINT });
+      if (!normalizeMetadataEndpoint(st.endpoint)) {
+        await setState({ endpoint: DEFAULT_METADATA_ENDPOINT, headers: null });
       }
       sendResponse?.({ ok: true });
       return;
@@ -185,10 +253,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       const st2 = await getState();
-      if (!st2.endpoint) {
-        await setState({ endpoint: DEFAULT_ENDPOINT });
+      if (!normalizeMetadataEndpoint(st2.endpoint)) {
+        await setState({ endpoint: DEFAULT_METADATA_ENDPOINT, headers: null });
       }
       const st3 = await getState();
+      const trustedEndpoint = normalizeMetadataEndpoint(st3.endpoint) || DEFAULT_METADATA_ENDPOINT;
 
       await setState({
         running: true,
@@ -202,7 +271,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       let requestHeaders = st3.headers || null;
       try {
         const metadata = await collectMetadataRange({
-          endpoint: st3.endpoint,
+          endpoint: trustedEndpoint,
           startIndex: msg.settings?.startIndex,
           maxImages: msg.settings?.maxImages,
           pageSize: DEFAULT_METADATA_PAGE_SIZE,
@@ -248,7 +317,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           type: "OFFSCREEN_START",
           tabId: msg.tabId,
           settings: msg.settings,
-          endpoint: st3.endpoint,
+          endpoint: trustedEndpoint,
           headers: requestHeaders,
           metadata
         });
@@ -291,6 +360,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           conflictAction: msg.conflictAction || "uniquify",
           saveAs: !!msg.saveAs
         });
+        await waitForDownloadCompletion(id);
         sendResponse?.({ ok: true, id });
       } catch (e) {
         sendResponse?.({ ok: false, error: String(e) });
@@ -307,6 +377,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === "EXPORT_DONE") {
       await setState({ running: false, phase: "done", progress: msg.progress, lastRun: Date.now() });
+      await clearSensitiveHeaders();
+      sendResponse?.({ ok: true });
+      return;
+    }
+
+    if (msg.type === "EXPORT_STOPPED") {
+      await setState({ running: false, phase: "stopped", progress: msg.progress });
       await clearSensitiveHeaders();
       sendResponse?.({ ok: true });
       return;
